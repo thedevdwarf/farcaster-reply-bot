@@ -91,6 +91,17 @@ export class FarcasterInteractionManager implements IInteractionProcessor {
   }
 
   /**
+   * Process a generic cast from the home feed
+   */
+  async processCast(cast: NeynarCast): Promise<void> {
+    const agentFid = this.config.FARCASTER_FID;
+    const agent = await this.client.getProfile(agentFid);
+    const genericCast = neynarCastToCast(cast);
+
+    await this.handleCast({ agent, cast: genericCast, originalCast: cast });
+  }
+
+  /**
    * Process webhook data from Neynar
    */
   async processWebhookData(webhookData: any): Promise<void> {
@@ -351,7 +362,7 @@ export class FarcasterInteractionManager implements IInteractionProcessor {
       memory,
       cast,
       source: FARCASTER_SOURCE,
-      callback: async (content: Content, _files: any[]) => {
+      callback: async (content: Content, _files?: any[]) => {
         logger.info('[Farcaster] mention received response:', response);
         return [];
       },
@@ -373,6 +384,146 @@ export class FarcasterInteractionManager implements IInteractionProcessor {
   async stop(): Promise<void> {
     logger.info('Stopping Farcaster interaction manager');
     await this.source.stop();
+  }
+
+  private async handleCast({
+    agent,
+    cast,
+    originalCast,
+  }: {
+    agent: Profile;
+    cast: Cast;
+    originalCast: NeynarCast;
+  }): Promise<void> {
+    if (cast.profile.fid === agent.fid) {
+      return;
+    }
+
+    const memory = await this.ensureCastConnection(cast);
+    const thread = await this.buildThreadForCast(
+      cast,
+      memory.id ? new Set([memory.id]) : new Set()
+    );
+
+    const currentPost = formatCast(cast);
+    const { timeline } = await this.client.getTimeline({ fid: agent.fid, pageSize: 20 });
+    const formattedTimeline = formatTimeline(this.runtime.character, timeline);
+    const formattedConversation = thread
+      .map((c) =>
+        `
+        - @${c.profile.username} (${formatCastTimestamp(c.timestamp)}):
+          ${c.text}`.trim()
+      )
+      .join('\n\n');
+
+    const state = await this.runtime.composeState(memory);
+    state.values = {
+      ...state.values,
+      farcasterUsername: agent.username,
+      timeline: formattedTimeline,
+      currentPost,
+      formattedConversation,
+    };
+
+    const shouldRespondTemplate = `
+# Task: Decide if we should interact with the post.
+# Instructions:
+- You are ${this.runtime.character.name}.
+- Your bio: ${this.runtime.character.bio}
+- Post:
+${currentPost}
+- Conversation:
+${formattedConversation}
+
+# Decisions:
+- LIKE: If you like the post.
+- RECAST: If you want to share it.
+- REPLY: If you want to reply.
+- IGNORE: If not interesting.
+
+You can combine actions, e.g., LIKE & RECAST & REPLY.
+Response format: [ACTION] (e.g., [LIKE], [LIKE & REPLY], [IGNORE])
+`;
+
+    const shouldRespondPrompt = composePrompt({
+      state,
+      template: shouldRespondTemplate,
+    });
+
+    logger.debug(`[Farcaster Decision] Generating decision for cast ${cast.hash}...`);
+
+    const response = await this.runtime.useModel(ModelType.TEXT_SMALL, {
+      prompt: shouldRespondPrompt,
+    });
+
+    logger.info(`[Farcaster Decision] Cast ${cast.hash} action decision: ${response}`);
+
+    if (response.includes('LIKE')) {
+      await this.client.likeCast(cast.hash);
+      logger.info(`[Farcaster] Liked cast ${cast.hash}`);
+    }
+
+    if (response.includes('RECAST')) {
+      await this.client.recastCast(cast.hash);
+      logger.info(`[Farcaster] Recasted cast ${cast.hash}`);
+    }
+
+    if (response.includes('REPLY')) {
+        logger.info(`[Farcaster Action] Decided to reply to cast ${cast.hash}`);
+        const callback = standardCastHandlerCallback({
+            client: this.client,
+            runtime: this.runtime,
+            config: this.config,
+            roomId: memory.roomId,
+            inReplyTo: {
+              hash: cast.hash,
+              fid: cast.authorFid,
+            },
+          });
+      
+          // Emit generic message received events
+          const messageReceivedPayload: MessagePayload = {
+            runtime: this.runtime,
+            message: memory,
+            source: FARCASTER_SOURCE,
+            callback,
+          };
+          
+          logger.info(`[Farcaster Action] Emitting MESSAGE_RECEIVED event for cast ${cast.hash}. This should trigger the Agent's reply handler.`);
+          this.runtime.emitEvent(EventType.MESSAGE_RECEIVED, messageReceivedPayload);
+
+          // Manually trigger handleMessage since the runtime doesn't have a default listener for this event in plugins
+          if (this.runtime.messageService) {
+            logger.info(`[Farcaster Action] Invoking messageService.handleMessage for cast ${cast.hash}`);
+            await this.runtime.messageService.handleMessage(
+              this.runtime,
+              memory,
+              callback
+            );
+          } else {
+            logger.warn(`[Farcaster Action] messageService is not available on runtime! Reply cannot be generated.`);
+          }
+      
+          // Emit platform-specific MENTION_RECEIVED event
+          const mentionPayload: FarcasterGenericCastPayload = {
+            runtime: this.runtime,
+            memory,
+            cast: originalCast,
+            source: FARCASTER_SOURCE,
+            callback: async (content: Content, _files?: any[]) => {
+              logger.info('[Farcaster] reply to feed cast response:', response);
+              return [];
+            },
+          };
+          this.runtime.emitEvent(FarcasterEventTypes.MENTION_RECEIVED, mentionPayload);
+    } else {
+         // save the memory so we don't process it again
+         try {
+            await this.runtime.createMemory(memory, 'messages');
+          } catch (error) {
+            logger.error(`Error creating ignoredmemory: ${JSON.stringify(error)}`);
+          }
+    }
   }
 
 }

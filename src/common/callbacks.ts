@@ -22,23 +22,25 @@ export function standardCastHandlerCallback({
   onError?: (error: unknown) => Promise<void>;
 }): HandlerCallback {
   const callback: HandlerCallback = async (content: Content, _files?: any) => {
+    logger.info(`[Farcaster Callback] Received content to post: "${content.text?.substring(0, 50)}..."`);
     try {
       if (config.FARCASTER_DRY_RUN) {
-        logger.info(`[Farcaster] Dry run: would have cast: ${content.text}`);
+        logger.info(`[Farcaster] Dry run enabled. Would have posted: ${content.text}`);
         return [];
       }
 
+      logger.debug(`[Farcaster Callback] Sending cast to API...`);
       const casts = await client.sendCast({ content, inReplyTo });
 
       if (casts.length === 0) {
-        logger.warn('[Farcaster] No casts posted');
+        logger.warn('[Farcaster Callback] No casts returned from API (empty array)');
         return [];
       }
 
       const memories: Memory[] = [];
       for (let i = 0; i < casts.length; i++) {
         const cast = casts[i];
-        logger.success(`[Farcaster] Published cast ${cast.hash}`);
+        logger.success(`[Farcaster Callback] Successfully published cast ${cast.hash}`);
 
         const memory = createCastMemory({
           roomId,
@@ -62,8 +64,8 @@ export function standardCastHandlerCallback({
 
       return memories;
     } catch (error) {
-      logger.error('[Farcaster] Error posting cast:', error);
-
+      logger.error('[Farcaster Callback] Error posting cast:', error instanceof Error ? error.message : String(error));
+      
       if (onError) {
         await onError(error);
       }

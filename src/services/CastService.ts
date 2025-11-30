@@ -68,8 +68,17 @@ export class FarcasterCastService implements CastServiceInterface {
     cursor?: string;
   }): Promise<FarcasterCast[]> {
     try {
+      const fid =
+        (this.runtime as any).config?.FARCASTER_FID ||
+        (this.runtime as any).settings?.FARCASTER_FID ||
+        Number.parseInt(this.runtime.getSetting('FARCASTER_FID') || process.env.FARCASTER_FID || '0');
+
+      if (!fid) {
+          throw new Error("FARCASTER_FID is missing in runtime settings/config");
+      }
+
       const { timeline } = await this.client.getTimeline({
-        fid: (this.runtime as any).config?.FARCASTER_FID || (this.runtime as any).settings?.FARCASTER_FID,
+        fid,
         pageSize: params.limit || 50,
       });
 
@@ -229,8 +238,17 @@ export class FarcasterCastService implements CastServiceInterface {
    */
   async getMentions(params: { agentId: UUID; limit?: number }): Promise<FarcasterCast[]> {
     try {
+      const fid =
+        (this.runtime as any).config?.FARCASTER_FID ||
+        (this.runtime as any).settings?.FARCASTER_FID ||
+        Number.parseInt(this.runtime.getSetting('FARCASTER_FID') || process.env.FARCASTER_FID || '0');
+
+      if (!fid) {
+          throw new Error("FARCASTER_FID is missing in runtime settings/config");
+      }
+
       const mentions = await this.client.getMentions({
-        fid: (this.runtime as any).config?.FARCASTER_FID || (this.runtime as any).settings?.FARCASTER_FID,
+        fid,
         pageSize: params.limit || 20,
       });
 

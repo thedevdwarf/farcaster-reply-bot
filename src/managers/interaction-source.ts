@@ -70,36 +70,78 @@ export class FarcasterPollingSource extends FarcasterInteractionSource {
 
   private async pollForInteractions(): Promise<void> {
     const agentFid = this.config.FARCASTER_FID;
-    const mentions = await this.client.getMentions({
-      fid: agentFid,
-      pageSize: 20,
-    });
+    
+    // 1. Process Mentions and Replies
+    try {
+      const mentions = await this.client.getMentions({
+        fid: agentFid,
+        pageSize: 20,
+      });
 
-    for (const cast of mentions) {
-      try {
-        const mention = neynarCastToCast(cast);
-        const memoryId = castUuid({ agentId: this.runtime.agentId, hash: mention.hash });
+      for (const cast of mentions) {
+        try {
+          const mention = neynarCastToCast(cast);
+          const memoryId = castUuid({ agentId: this.runtime.agentId, hash: mention.hash });
 
-        // Deduplication check - skip if already processed
-        if (await this.runtime.getMemoryById(memoryId)) {
-          continue;
+          // Deduplication check - skip if already processed
+          if (await this.runtime.getMemoryById(memoryId)) {
+            logger.debug(`[Farcaster Polling] Skipping mention ${mention.hash} - already processed`);
+            continue;
+          }
+
+          logger.info(`[Farcaster Polling] New Mention/Reply found: ${mention.hash} from @${mention.profile.username}`);
+
+          // Filter out the agent mentions (self-posts)
+          if (mention.authorFid === agentFid) {
+            const memory = await this.processor.ensureCastConnection(mention);
+            await this.runtime.addEmbeddingToMemory(memory);
+            await this.runtime.createMemory(memory, 'messages');
+            continue;
+          }
+
+          // Process mention through the processor
+          await this.processor.processMention(cast);
+        } catch (error) {
+          logger.error('[Farcaster] Error processing mention:', error instanceof Error ? error.message : String(error));
         }
-
-        logger.info('New Cast found', mention.hash);
-
-        // Filter out the agent mentions (self-posts)
-        if (mention.authorFid === agentFid) {
-          const memory = await this.processor.ensureCastConnection(mention);
-          await this.runtime.addEmbeddingToMemory(memory);
-          await this.runtime.createMemory(memory, 'messages');
-          continue;
-        }
-
-        // Process mention through the processor
-        await this.processor.processMention(cast);
-      } catch (error) {
-        logger.error('[Farcaster] Error processing mention:', error instanceof Error ? error.message : String(error));
       }
+    } catch (error) {
+      logger.error('[Farcaster] Error polling mentions:', error instanceof Error ? error.message : String(error));
+    }
+
+    // 2. Process Home Feed (Following)
+    try {
+      const feedCasts = await this.client.getHomeFeed({
+        fid: agentFid,
+        pageSize: 10, // Process smaller batch for home feed
+      });
+
+      for (const cast of feedCasts) {
+        try {
+          const genericCast = neynarCastToCast(cast);
+          const memoryId = castUuid({ agentId: this.runtime.agentId, hash: genericCast.hash });
+
+          // Deduplication check - skip if already processed
+          if (await this.runtime.getMemoryById(memoryId)) {
+            logger.debug(`[Farcaster Polling] Skipping home feed cast ${genericCast.hash} - already processed`);
+            continue;
+          }
+
+          logger.info(`[Farcaster Polling] New Home Feed Cast found: ${genericCast.hash} from @${genericCast.profile.username}`);
+
+          // Filter out the agent mentions (self-posts)
+          if (genericCast.authorFid === agentFid) {
+            continue;
+          }
+
+          // Process home feed cast through the processor
+          await this.processor.processCast(cast);
+        } catch (error) {
+          logger.error('[Farcaster] Error processing home feed cast:', error instanceof Error ? error.message : String(error));
+        }
+      }
+    } catch (error) {
+      logger.error('[Farcaster] Error polling home feed:', error instanceof Error ? error.message : String(error));
     }
   }
 }
